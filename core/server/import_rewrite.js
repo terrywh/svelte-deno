@@ -19,5 +19,5 @@ export function rewrite(code, path, rewriteHandler) {
 export function defaultHandler(n) {
     if (n.startsWith("/") || n.startsWith("./") || n.startsWith("../")) // 相对或绝对路径保持不变
         return n
-    return `/@module/${n}/index.mjs` // 访问非 JS 文件 | 内部包，补充完整路径
+    return `/@module/${n}/index.js` // 访问非 JS 文件 | 内部包，补充完整路径
 }
