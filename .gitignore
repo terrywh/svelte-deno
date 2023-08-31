@@ -1,0 +1,5 @@
+/node_modules/
+.stfolder
+.stignore
+.vscode
+.DS_Store
