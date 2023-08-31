@@ -12,8 +12,11 @@ serve([
     createSvelteServer({
         static: `${root}/public`,
         module: `${root}/node_modules`, // => /@module
-        compile: {
+        svelte: {
             dev: Deno.env.DEBUG ? true : false,
+        },
+        compile: {
+            rewriteImport: false, // 不要重写 import 目标（可自定义使用 importmap 机制）
         }
     }),
     function(_url, _req) {

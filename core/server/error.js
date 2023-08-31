@@ -44,7 +44,7 @@ export class HttpError extends Error {
     }
 
     toString() {
-        return `(${this.code}) ${this.desc}`
+        return `(${this.code}) ${this.message}`
     }
 
     toJSON() {

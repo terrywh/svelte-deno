@@ -1,6 +1,6 @@
 import { extname, join, resolve } from "https://deno.land/std@0.200.0/path/mod.ts";
 import { compile } from "npm:svelte/compiler";
-import { rewriteImports } from "./import_rewrite.js";
+import { rewrite } from "./import_rewrite.js";
 import { defaultErrorHandler, HttpError } from "./error.js";
 
 /**
@@ -86,8 +86,12 @@ export async function defaultStaticHandler(_req, file, stat, options) {
  * @returns 
  */
 export async function defaultScriptHandler(_req, file, stat, options) {
-    const code = new TextDecoder().decode(await Deno.readFile(file));
-    return new Response(rewriteImports(code, file), {
+    let code;
+    if (options.compile.rewriteImport)
+        code = rewrite(new TextDecoder().decode(await Deno.readFile(file)), file);
+    else
+        code = (await Deno.open(file, {read: true})).readable;
+    return new Response(code, {
         headers: {
             "content-type": parseContentType(file),
             "cache-control": `max-age=${options.ttl}, must-revalidate`,
@@ -108,8 +112,7 @@ export async function defaultSvelteHandler(req, file, stat, options) {
     try {
         compiled = await compileSvelte(file, stat, options);
     } catch (ex) {
-        return options.errorHandler(req, new HttpError(
-            "failed to compile svelte", 10500, 500, `failed to compile svelte '${file}': ${ex}`))
+        return options.errorHandler(req, ex);
     }
 
     return new Response(compiled.js.code, {headers: {
@@ -127,9 +130,9 @@ export async function defaultSvelteHandler(req, file, stat, options) {
  * @returns 
  */
 export function defaultFileHandler(req, path, stat, options) {
-    if (path.endsWith(".svelte")) 
+    if (stat && stat.isFile && path.endsWith(".svelte")) 
         return defaultSvelteHandler(req, path, stat, options)
-    if (path.endsWith(".mjs") || path.endsWith(".js"))
+    if (stat && stat.isFile && (path.endsWith(".mjs") || path.endsWith(".js")))
         return defaultScriptHandler(req, path, stat, options)
     return defaultStaticHandler(req, path, stat, options)
 }
@@ -168,6 +171,10 @@ function handleNotModified(stat, options) {
  *      {"prefix": "/", "path": "/data/htdocs/xxx/public"},
  * ]
  * 
+ * @typedef {Object} StaticServerCompileOption
+ * @property {boolean} rewriteImport 重写 import 目标（名称式应用替换为路径式应用，默认为 false 不起用）；
+ *  可替换式使用 [importmap](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/script/type/importmap) 机制；
+ * 
  * @typedef {Object} StaticServerOption 静态文件服务器选项
  * @property {string | Record<string, string> | StaticServerDirMap[]} static 静态文件查找路径，访问路径与文件路径映射目录;
  * 1. 多个路径映射其匹配顺序与定义顺序一致
@@ -176,6 +183,7 @@ function handleNotModified(stat, options) {
  * @property {string} [index="index.html"] 索引文件，默认 "index.html" 文件
  * @property {StaticServerHandler} [errorHandler] 错误处理器
  * @property {StaticServerHandler} [fileHandler] 错误处理器
+ * @property {StaticServerCompileOption} compile 编译选项
  * 
  * @example 仅指定根路径
  * { static: "/data/htdocs/xxx" }
@@ -185,6 +193,14 @@ function handleNotModified(stat, options) {
  *      "/": "/data/htdocs/xxx/public"   
  * } }
  */
+
+async function asyncStat(path) {
+    try {
+        return await Deno.lstat(path);
+    } catch(ex) {
+        return null;
+    }
+}
 
 /**
  * 创建静态文件服务器
@@ -207,7 +223,7 @@ export function createStaticServer(options) {
      */
     const server = async function (url, req) {
         const path = parseRequestFile(url, options);
-        const stat = await Deno.lstat(path);
+        const stat = await asyncStat(path);
 
         if (!!stat && stat.isDirectory) {
             path = join(path, options.index)
@@ -216,7 +232,7 @@ export function createStaticServer(options) {
             if (options.index.redir) 
                 return handleRedirect(url);
             
-            stat = await Deno.lstat(path);
+            stat = await asyncStat(path);
         }
         if (!stat || !stat.isFile) // 无法找到文件
             return false // 未处理（交给下个服务处理器）
@@ -239,20 +255,19 @@ const cacheSvelte = new Map;
  * @returns 
  */
 async function compileSvelte(path, stat, options) {
-    if (!stat || !stat.isFile)
-        throw new Error("file not found")
-    const modify = null;
-    // const modify = cacheSvelte.get(path + "/modify");
+    // const modify = null;
+    const modify = cacheSvelte.get(path + "/modify");
 
     if (!modify || modify < stat.mtime.getTime()) {
         const code = new TextDecoder().decode(await Deno.readFile(path));
-        const cc = compile(code, options.compile);
+        const cc = compile(code, options.svelte);
         cc.mtime = stat.mtime;
-        cc.js.code = rewriteImports(cc.js.code, path, function(n, defaultHandler) {
-            if (n.startsWith("svelte/internal"))
-                return `/@module/svelte/src/runtime/internal${n.substring(15)}/index.js`;
-            return defaultHandler(n);
-        })
+        if (options.compile.rewriteImport) 
+            cc.js.code = rewrite(cc.js.code, path, function(n, defaultHandler) {
+                if (n.startsWith("svelte/internal"))
+                    return `/@module/svelte/src/runtime/internal${n.substring(15)}/index.js`;
+                return defaultHandler(n);
+            })
         cacheSvelte.set(path + "/modify", stat.mtime.getTime());
         cacheSvelte.set(path, cc);
         return cc;
@@ -264,7 +279,7 @@ async function compileSvelte(path, stat, options) {
 /**
  * @typedef {Object} SvelteServerOptionEx 支持 Svelte 组件的静态服务器选项
  * @property {string} [module] 模块路径 (node_modules)
- * @property {import("npm:svelte/types/compiler").CompileOptions} compile 编译选项
+ * @property {import("npm:svelte/compiler").CompileOptions} svelte 编译选项
  * @typedef {StaticServerOption & SvelteServerOptionEx} SvelteServerOption
  * @see StaticServerOption
  */
@@ -275,8 +290,8 @@ async function compileSvelte(path, stat, options) {
  */
 export function createSvelteServer(options) {
     options = Object.assign({}, {index: "index.html", handler: {}, ttl: 10}, options)
-    options.compile = Object.assign(options.compile || {}, {
-        sveltePath: "svelte",
+    options.svelte = Object.assign(options.svelte || {}, {
+        // sveltePath: "svelte",
         dev: Deno.env.DEBUG ? true : false,
     })
     if (!options.fileHandler) options.fileHandler = defaultFileHandler // 与默认的静态文件服务器不同

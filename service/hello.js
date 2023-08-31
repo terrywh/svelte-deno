@@ -17,17 +17,22 @@ export default {
         return new HttpError("failed to do something", 12345, 400, "failed to do something")
     },
     "/chunk": function (_method, _query, _body) {
+        let canceled = false;
         const stream = new ReadableStream({
-            // type: "direct",
             async start(controller) {
                 const encoder = new TextEncoder();
                 for (let i=0;i<100;++i) {
+                    if (canceled) break;
+                    console.log("enqueue:", i);
                     controller.enqueue(encoder.encode(`event: data\ndata: ${i}\n\n`))
                     // controller.flush()
                     await new Promise((resolve) => setTimeout(resolve, 1000));
                 }
                 controller.close()
             },
+            cancel() {
+                canceled = true;
+            }
         })
         return new Response(stream, {
             headers: {
